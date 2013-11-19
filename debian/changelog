@@ -1,4 +1,10 @@
-python-chef (0.2.1) UNRELEASED; urgency=low
+python-chef (0.2.2-1) unstable; urgency=low
+
+  * Bump version to 0.2.2
+
+ -- Ron Pedde <ron@pedde.com>  Tue, 19 Nov 2013 11:27:57 -0600
+
+python-chef (0.2.1-1) unstable; urgency=low
 
   * Initial release.
 
