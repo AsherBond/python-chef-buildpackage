@@ -67,8 +67,9 @@ class ChefAPI(object):
     """
 
     ruby_value_re = re.compile(r'#\{([^}]+)\}')
+    env_value_re = re.compile(r'ENV\[(.+)\]')
 
-    def __init__(self, url, key, client, version='0.10.8'):
+    def __init__(self, url, key, client, version='0.10.8', headers={}):
         self.url = url.rstrip('/')
         self.parsed_url = urlparse.urlparse(self.url)
         if not isinstance(key, Key):
@@ -76,6 +77,7 @@ class ChefAPI(object):
         self.key = key
         self.client = client
         self.version = version
+        self.headers = dict((k.lower(), v) for k, v in headers.iteritems())
         self.version_parsed = pkg_resources.parse_version(self.version)
         self.platform = self.parsed_url.hostname == 'api.opscode.com'
         if not api_stack_value():
@@ -104,6 +106,10 @@ class ChefAPI(object):
                 expr = match.group(1).strip()
                 if expr == 'current_dir':
                     return os.path.dirname(path)
+                envmatch = cls.env_value_re.match(expr)
+                if envmatch:
+                    envmatch = envmatch.group(1).strip('"').strip("'")
+                    return os.environ.get(envmatch) or ''
                 log.debug('Unknown ruby expression in line "%s"', line)
                 raise UnknownRubyExpression
             try:
@@ -111,25 +117,32 @@ class ChefAPI(object):
             except UnknownRubyExpression:
                 continue
             if key == 'chef_server_url':
+                log.debug('Found URL: %r', value)
                 url = value
             elif key == 'node_name':
+                log.debug('Found client name: %r', value)
                 client_name = value
             elif key == 'client_key':
+                log.debug('Found key path: %r', value)
                 key_path = value
                 if not os.path.isabs(key_path):
                     # Relative paths are relative to the config file
                     key_path = os.path.abspath(os.path.join(os.path.dirname(path), key_path))
-        if not url:
+        if not (url and client_name and key_path):
             # No URL, no chance this was valid, try running Ruby
-            log.debug('No Chef server URL found, trying Ruby parse')
+            log.debug('No Chef server config found, trying Ruby parse')
+            url = key_path = client_name = None
             proc = subprocess.Popen('ruby', stdin=subprocess.PIPE, stdout=subprocess.PIPE)
             script = config_ruby_script % path.replace('\\', '\\\\').replace("'", "\\'")
             out, err = proc.communicate(script)
             if proc.returncode == 0 and out.strip():
                 data = json.loads(out)
+                log.debug('Ruby parse succeeded with %r', data)
                 url = data.get('chef_server_url')
                 client_name = data.get('node_name')
                 key_path = data.get('client_key')
+            else:
+                log.debug('Ruby parse failed with exit code %s: %s', proc.returncode, out.strip())
         if not url:
             # Still no URL, can't use this config
             log.debug('Still no Chef server URL found')
@@ -179,22 +192,24 @@ class ChefAPI(object):
             path=self.parsed_url.path+path.split('?', 1)[0], body=data,
             host=self.parsed_url.netloc, timestamp=datetime.datetime.utcnow(),
             user_id=self.client)
-        headers = dict((k.lower(), v) for k, v in headers.iteritems())
-        headers['x-chef-version'] = self.version
-        headers.update(auth_headers)
+        request_headers = {}
+        request_headers.update(self.headers)
+        request_headers.update(dict((k.lower(), v) for k, v in headers.iteritems()))
+        request_headers['x-chef-version'] = self.version
+        request_headers.update(auth_headers)
         try:
-            response = self._request(method, self.url+path, data, dict((k.capitalize(), v) for k, v in headers.iteritems()))
+            response = self._request(method, self.url+path, data, dict((k.capitalize(), v) for k, v in request_headers.iteritems()))
         except urllib2.HTTPError, e:
-            err = e.read()
+            e.content = e.read()
             try:
-                err = json.loads(err)
-                raise ChefServerError.from_error(err['error'], code=e.code)
+                e.content = json.loads(e.content)
+                raise ChefServerError.from_error(e.content['error'], code=e.code)
             except ValueError:
                 pass
-            raise
+            raise e
         return response
 
-    def api_request(self, method, path, headers={}, data=None):    
+    def api_request(self, method, path, headers={}, data=None):
         headers = dict((k.lower(), v) for k, v in headers.iteritems())
         headers['accept'] = 'application/json'
         if data is not None:
